@@ -12,7 +12,7 @@ import {
 } from '@shopify/ui-extensions-react/point-of-sale'
 import { useState, useRef, useEffect, useCallback } from 'react'
 
-const SERVER_URL = "https://RENDER_URL_HERE"
+const SERVER_URL = "https://search-0wf4.onrender.com"
 const MIN_KEYWORD_LENGTH = 4
 const DEBOUNCE_MS = 300
 

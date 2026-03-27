@@ -1,0 +1,16 @@
+client_id = "a46d62cb37669d8e638743bee6c71905"
+name = "Search"
+application_url = "https://search-0wf4.onrender.com"
+embedded = true
+
+[build]
+automatically_update_urls_on_dev = true
+
+[webhooks]
+api_version = "2025-07"
+
+[access_scopes]
+scopes = "read_products,read_inventory"
+
+[auth]
+redirect_urls = [ "https://search-0wf4.onrender.com/auth/callback" ]
