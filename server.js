@@ -141,7 +141,8 @@ app.get("/search", (req, res) => {
     return res.json({ results: [], total: variantCache.length, cacheBuiltAt });
   }
   const kw = normalise(q.trim());
-  const results = variantCache.filter((v) => variantMatches(v, kw)).slice(0, 100);
+  const limit = parseInt(req.query.limit) || 100;
+  const results = variantCache.filter((v) => variantMatches(v, kw)).slice(0, limit);
   res.json({ results, total: variantCache.length, cacheBuiltAt });
 });
 
