@@ -1,0 +1,17 @@
+api_version = "2025-04"
+
+[[extensions]]
+type = "ui_extension"
+name = "Search"
+handle = "search"
+
+[[extensions.targeting]]
+module = "./src/Tile.jsx"
+target = "pos.home.tile.render"
+
+[[extensions.targeting]]
+module = "./src/Modal.jsx"
+target = "pos.home.modal.render"
+
+[extensions.capabilities]
+network_access = true

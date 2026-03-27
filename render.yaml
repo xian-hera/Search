@@ -1,0 +1,18 @@
+services:
+  - type: web
+    name: search
+    runtime: node
+    buildCommand: npm install
+    startCommand: npm start
+    envVars:
+      - key: SHOPIFY_API_KEY
+        sync: false
+      - key: SHOPIFY_API_SECRET
+        sync: false
+      - key: APP_URL
+        sync: false
+      - key: SHOP_DOMAIN
+        sync: false
+      - key: SHOP_ACCESS_TOKEN
+        sync: false
+    healthCheckPath: /

@@ -1,0 +1,10 @@
+{
+  "name": "search",
+  "version": "1.0.0",
+  "private": true,
+  "dependencies": {
+    "react": "^18.0.0",
+    "@shopify/ui-extensions-react": "2025.4.x",
+    "react-reconciler": "0.29.0"
+  }
+}
