@@ -1,6 +1,9 @@
 api_version = "2025-04"
 
 [[extensions]]
+
+uid = "e893bca6-9ab4-6a83-745e-a1347013f84d882acb9d"
+
 type = "ui_extension"
 name = "Search"
 handle = "search"

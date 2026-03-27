@@ -9,6 +9,8 @@ import {
   Stack,
   useApi,
   Badge,
+  Pressable,
+  Divider,
 } from '@shopify/ui-extensions-react/point-of-sale'
 import { useState, useRef, useEffect, useCallback } from 'react'
 
@@ -31,7 +33,7 @@ const Modal = () => {
   useEffect(() => {
     fetch(`${SERVER_URL}/cache/status`)
       .then(r => r.json())
-      .then(data => setCacheInfo(`${data.total} variants ready`))
+      .then(data => setCacheInfo(`${data.total} variants indexed`))
       .catch(() => setCacheInfo('Server warming up…'))
   }, [])
 
@@ -81,7 +83,7 @@ const Modal = () => {
   const handleRefresh = async () => {
     try {
       await fetch(`${SERVER_URL}/cache/refresh`, { method: 'POST' })
-      setCacheInfo('Refreshing… please wait a minute')
+      setCacheInfo('Refreshing…')
     } catch {
       setError('Refresh failed')
     }
@@ -95,33 +97,24 @@ const Modal = () => {
         <ScrollView>
           <Stack direction="vertical" spacing="loose" padding="base">
 
-            {/* TextField fills remaining space, Button fixed on right */}
-            <Stack direction="horizontal" spacing="tight" alignment="center">
-              <Stack direction="vertical" spacing="none" fill>
-                <TextField
-                  label=""
-                  placeholder="SKU, barcode, title or name…"
-                  value={keyword}
-                  onChange={setKeyword}
-                />
-              </Stack>
-              <Button
-                title="Search"
-                type="primary"
-                onPress={handleSearch}
-                disabled={loading || keyword.length === 0}
-              />
-            </Stack>
+            {/* Search bar — full width TextField + Search button */}
+            <TextField
+              label="Search"
+              placeholder="SKU, barcode, title or name…"
+              value={keyword}
+              onChange={setKeyword}
+              action={{ label: 'Search', onAction: handleSearch }}
+            />
 
+            {/* Cache info — small, right-aligned */}
             {cacheInfo && (
-              <Stack direction="horizontal" spacing="tight">
-                <Text color="TextSubdued">{cacheInfo}</Text>
-                <Button title="↺ Refresh" type="plain" onPress={handleRefresh} />
+              <Stack direction="horizontal" spacing="tight" alignment="center" distribution="trailing">
+                <Text size="small" color="TextSubdued">{cacheInfo}</Text>
+                <Button title="↺" type="plain" onPress={handleRefresh} />
               </Stack>
             )}
 
             {loading && <Text color="TextSubdued">Searching…</Text>}
-
             {error && <Text color="TextCritical">Error: {error}</Text>}
 
             {!loading && keyword.length > 0 && keyword.length < MIN_KEYWORD_LENGTH && (
@@ -135,17 +128,18 @@ const Modal = () => {
             )}
 
             {results.length > 0 && (
-              <Text color="TextSubdued">
+              <Text size="small" color="TextSubdued">
                 {results.length} result{results.length !== 1 ? 's' : ''}
-                {results.length === 100 ? ' (showing top 100)' : ''}
+                {results.length === 100 ? ' (top 100)' : ''}
               </Text>
             )}
 
-            {results.map((variant) => (
+            {results.map((variant, i) => (
               <VariantRow
                 key={variant.variantId}
                 variant={variant}
                 onPress={handleVariantPress}
+                showDivider={i < results.length - 1}
               />
             ))}
 
@@ -158,7 +152,7 @@ const Modal = () => {
 
 export default reactExtension('pos.home.modal.render', () => <Modal />)
 
-function VariantRow({ variant, onPress }) {
+function VariantRow({ variant, onPress, showDivider }) {
   const { productTitle, variantTitle, customName, sku, barcode, price, inventoryQuantity } = variant
 
   const isDefault   = variantTitle === 'Default Title'
@@ -180,21 +174,24 @@ function VariantRow({ variant, onPress }) {
     : 'TextCritical'
 
   return (
-    <Button type="plain" onPress={() => onPress(variant)}>
-      <Stack direction="vertical" spacing="extraTight" padding="base">
-        <Text fontWeight="bold">{productTitle}</Text>
-        {subtitle && <Text color="TextSubdued">{subtitle}</Text>}
-        <Stack direction="horizontal" spacing="tight">
-          {sku     && <Badge status="info" text={`SKU: ${sku}`} />}
-          {barcode && <Badge text={`Barcode: ${barcode}`} />}
+    <>
+      <Pressable onPress={() => onPress(variant)}>
+        <Stack direction="vertical" spacing="extraTight" padding="base">
+          <Text fontWeight="bold">{productTitle}</Text>
+          {subtitle && <Text color="TextSubdued">{subtitle}</Text>}
+          <Stack direction="horizontal" spacing="tight">
+            {sku     && <Badge status="info" text={`SKU: ${sku}`} />}
+            {barcode && <Badge text={`Barcode: ${barcode}`} />}
+          </Stack>
+          <Stack direction="horizontal" spacing="tight">
+            {price != null && (
+              <Text fontWeight="bold">${parseFloat(price).toFixed(2)}</Text>
+            )}
+            <Text color={stockColor}>{stockText}</Text>
+          </Stack>
         </Stack>
-        <Stack direction="horizontal" spacing="tight">
-          {price != null && (
-            <Text fontWeight="bold">${parseFloat(price).toFixed(2)}</Text>
-          )}
-          <Text color={stockColor}>{stockText}</Text>
-        </Stack>
-      </Stack>
-    </Button>
+      </Pressable>
+      {showDivider && <Divider />}
+    </>
   )
 }
