@@ -29,6 +29,7 @@ const PRODUCTS_QUERY = `
       nodes {
         id
         title
+        featuredImage { url }
         variants(first: 100) {
           nodes {
             id
@@ -36,8 +37,8 @@ const PRODUCTS_QUERY = `
             sku
             barcode
             price
-            inventoryQuantity
             metafield(namespace: "custom", key: "name") { value }
+            image { url }
           }
         }
       }
@@ -75,6 +76,7 @@ async function buildCache() {
       const data = await shopifyGraphQL(PRODUCTS_QUERY, cursor ? { cursor } : {});
       const page = data.products;
       for (const product of page.nodes) {
+        const productImage = product.featuredImage?.url || null;
         for (const variant of product.variants.nodes) {
           flat.push({
             variantId: variant.id,
@@ -86,8 +88,8 @@ async function buildCache() {
             sku: variant.sku || "",
             barcode: variant.barcode || "",
             price: variant.price,
-            inventoryQuantity: variant.inventoryQuantity ?? null,
             customName: variant.metafield?.value || "",
+            imageUrl: variant.image?.url || productImage || null,
           });
         }
       }
@@ -105,7 +107,7 @@ async function buildCache() {
 }
 
 buildCache();
-setInterval(buildCache, 60 * 60 * 1000);
+setInterval(buildCache, 12 * 60 * 60 * 1000);
 
 // ─── Search helpers ───────────────────────────────────────────────────────────
 
@@ -117,12 +119,23 @@ function normalise(str) {
 
 function variantMatches(variant, kw) {
   return (
-    normalise(variant.productTitle).includes(kw) ||
-    normalise(variant.variantTitle).includes(kw) ||
     normalise(variant.customName).includes(kw) ||
+    normalise(variant.productTitle).includes(kw) ||
     normalise(variant.sku).includes(kw) ||
     normalise(variant.barcode).includes(kw)
   );
+}
+
+function sortByPriority(results, kw) {
+  return [...results].sort((a, b) => {
+    const score = (v) => {
+      if (normalise(v.customName).includes(kw)) return 0;
+      if (normalise(v.productTitle).includes(kw)) return 1;
+      if (normalise(v.sku).includes(kw)) return 2;
+      return 3;
+    };
+    return score(a) - score(b);
+  });
 }
 
 // ─── CORS ─────────────────────────────────────────────────────────────────────
@@ -133,27 +146,76 @@ app.use((req, res, next) => {
   next();
 });
 
-// ─── Endpoints ────────────────────────────────────────────────────────────────
+// ─── Search endpoint ──────────────────────────────────────────────────────────
 
 app.get("/search", (req, res) => {
   const { q } = req.query;
+  const limit = parseInt(req.query.limit) || 50;
   if (!q || q.trim().length < 2) {
     return res.json({ results: [], total: variantCache.length, cacheBuiltAt });
   }
   const kw = normalise(q.trim());
-  const limit = parseInt(req.query.limit) || 100;
-  const results = variantCache.filter((v) => variantMatches(v, kw)).slice(0, limit);
-  res.json({ results, total: variantCache.length, cacheBuiltAt });
+  const matched = variantCache.filter((v) => variantMatches(v, kw));
+  const sorted = sortByPriority(matched, kw);
+  res.json({ results: sorted.slice(0, limit), total: variantCache.length, cacheBuiltAt });
 });
 
-app.post("/cache/refresh", (req, res) => {
-  buildCache();
-  res.json({ message: "Cache refresh started" });
+// ─── Variant inventory endpoint ───────────────────────────────────────────────
+// Returns inventory for all locations for a given variant
+
+const INVENTORY_QUERY = `
+  query GetVariantInventory($id: ID!) {
+    productVariant(id: $id) {
+      id
+      title
+      sku
+      barcode
+      price
+      inventoryItem {
+        inventoryLevels(first: 50) {
+          nodes {
+            quantities(names: ["available"]) {
+              name
+              quantity
+            }
+            location {
+              id
+              name
+            }
+          }
+        }
+      }
+    }
+  }
+`;
+
+app.get("/variant/:id", async (req, res) => {
+  const variantGid = `gid://shopify/ProductVariant/${req.params.id}`;
+  try {
+    const data = await shopifyGraphQL(INVENTORY_QUERY, { id: variantGid });
+    const variant = data.productVariant;
+    if (!variant) return res.status(404).json({ error: "Variant not found" });
+
+    const locations = variant.inventoryItem.inventoryLevels.nodes.map((level) => ({
+      locationId: level.location.id.split("/").pop(),
+      locationName: level.location.name,
+      available: level.quantities.find(q => q.name === "available")?.quantity ?? 0,
+    }));
+
+    res.json({
+      variantId: req.params.id,
+      title: variant.title,
+      sku: variant.sku,
+      barcode: variant.barcode,
+      price: variant.price,
+      locations,
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
-app.get("/cache/status", (req, res) => {
-  res.json({ total: variantCache.length, cacheBuiltAt, cacheBuilding });
-});
+// ─── OAuth ────────────────────────────────────────────────────────────────────
 
 app.get("/auth", (req, res) => {
   const { shop } = req.query;
@@ -185,6 +247,15 @@ app.get("/auth/callback", async (req, res) => {
   const { access_token } = await tokenRes.json();
   console.log(`Installed on ${shop}: ${access_token}`);
   res.redirect(`https://${shop}/admin/apps`);
+});
+
+app.get("/cache/refresh", (req, res) => {
+  buildCache();
+  res.json({ message: "Cache refresh started" });
+});
+
+app.get("/cache/status", (req, res) => {
+  res.json({ total: variantCache.length, cacheBuiltAt, cacheBuilding });
 });
 
 app.get("/", (req, res) => res.send("Search POS OK"));
