@@ -16,8 +16,6 @@ const {
 
 const SCOPES = "read_products,read_inventory";
 
-// ─── Product cache ────────────────────────────────────────────────────────────
-
 let variantCache = [];
 let cacheBuiltAt = null;
 let cacheBuilding = false;
@@ -30,15 +28,16 @@ const PRODUCTS_QUERY = `
         id
         title
         featuredImage { url }
+        wigNumber: metafield(namespace: "custom", key: "wig_number") { value }
         variants(first: 100) {
           nodes {
             id
             title
             sku
-            barcode
             price
-            metafield(namespace: "custom", key: "name") { value }
             image { url }
+            customName: metafield(namespace: "custom", key: "name") { value }
+            displaySection: metafield(namespace: "custom", key: "display_section") { value }
           }
         }
       }
@@ -77,6 +76,7 @@ async function buildCache() {
       const page = data.products;
       for (const product of page.nodes) {
         const productImage = product.featuredImage?.url || null;
+        const wigNumber = product.wigNumber?.value || "";
         for (const variant of product.variants.nodes) {
           flat.push({
             variantId: variant.id,
@@ -86,9 +86,10 @@ async function buildCache() {
             productTitle: product.title,
             variantTitle: variant.title,
             sku: variant.sku || "",
-            barcode: variant.barcode || "",
             price: variant.price,
-            customName: variant.metafield?.value || "",
+            customName: variant.customName?.value || "",
+            wigNumber,
+            displaySection: variant.displaySection?.value || "",
             imageUrl: variant.image?.url || productImage || null,
           });
         }
@@ -109,8 +110,6 @@ async function buildCache() {
 buildCache();
 setInterval(buildCache, 12 * 60 * 60 * 1000);
 
-// ─── Search helpers ───────────────────────────────────────────────────────────
-
 function normalise(str) {
   if (!str) return "";
   return str.toLowerCase().normalize("NFD")
@@ -122,7 +121,7 @@ function variantMatches(variant, kw) {
     normalise(variant.customName).includes(kw) ||
     normalise(variant.productTitle).includes(kw) ||
     normalise(variant.sku).includes(kw) ||
-    normalise(variant.barcode).includes(kw)
+    normalise(variant.wigNumber).includes(kw)
   );
 }
 
@@ -132,21 +131,18 @@ function sortByPriority(results, kw) {
       if (normalise(v.customName).includes(kw)) return 0;
       if (normalise(v.productTitle).includes(kw)) return 1;
       if (normalise(v.sku).includes(kw)) return 2;
-      return 3;
+      if (normalise(v.wigNumber).includes(kw)) return 3;
+      return 4;
     };
     return score(a) - score(b);
   });
 }
-
-// ─── CORS ─────────────────────────────────────────────────────────────────────
 
 app.use((req, res, next) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
   next();
 });
-
-// ─── Search endpoint ──────────────────────────────────────────────────────────
 
 app.get("/search", (req, res) => {
   const { q } = req.query;
@@ -160,16 +156,12 @@ app.get("/search", (req, res) => {
   res.json({ results: sorted.slice(0, limit), total: variantCache.length, cacheBuiltAt });
 });
 
-// ─── Variant inventory endpoint ───────────────────────────────────────────────
-// Returns inventory for all locations for a given variant
-
 const INVENTORY_QUERY = `
   query GetVariantInventory($id: ID!) {
     productVariant(id: $id) {
       id
       title
       sku
-      barcode
       price
       inventoryItem {
         inventoryLevels(first: 50) {
@@ -195,18 +187,15 @@ app.get("/variant/:id", async (req, res) => {
     const data = await shopifyGraphQL(INVENTORY_QUERY, { id: variantGid });
     const variant = data.productVariant;
     if (!variant) return res.status(404).json({ error: "Variant not found" });
-
     const locations = variant.inventoryItem.inventoryLevels.nodes.map((level) => ({
       locationId: level.location.id.split("/").pop(),
       locationName: level.location.name,
       available: level.quantities.find(q => q.name === "available")?.quantity ?? 0,
     }));
-
     res.json({
       variantId: req.params.id,
       title: variant.title,
       sku: variant.sku,
-      barcode: variant.barcode,
       price: variant.price,
       locations,
     });
@@ -214,8 +203,6 @@ app.get("/variant/:id", async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
-
-// ─── OAuth ────────────────────────────────────────────────────────────────────
 
 app.get("/auth", (req, res) => {
   const { shop } = req.query;
