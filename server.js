@@ -116,7 +116,10 @@ function normalise(str) {
     .replace(/[\u0300-\u036f]/g, "").replace(/\s+/g, " ").trim();
 }
 
-function variantMatches(variant, kw) {
+// ─── Match helpers ────────────────────────────────────────────────────────────
+
+// Single keyword: variant contains kw in any field
+function variantMatchesSingle(variant, kw) {
   return (
     normalise(variant.customName).includes(kw) ||
     normalise(variant.productTitle).includes(kw) ||
@@ -125,18 +128,20 @@ function variantMatches(variant, kw) {
   );
 }
 
-function sortByPriority(results, kw) {
-  return [...results].sort((a, b) => {
-    const score = (v) => {
-      if (normalise(v.customName).includes(kw)) return 0;
-      if (normalise(v.productTitle).includes(kw)) return 1;
-      if (normalise(v.sku).includes(kw)) return 2;
-      if (normalise(v.wigNumber).includes(kw)) return 3;
-      return 4;
-    };
-    return score(a) - score(b);
-  });
+// Multi-keyword (AND): every token must appear somewhere in the variant
+function variantMatchesAll(variant, tokens) {
+  return tokens.every(t => variantMatchesSingle(variant, t));
 }
+
+function scoreVariant(variant, kw) {
+  if (normalise(variant.customName).includes(kw)) return 0;
+  if (normalise(variant.productTitle).includes(kw)) return 1;
+  if (normalise(variant.sku).includes(kw)) return 2;
+  if (normalise(variant.wigNumber).includes(kw)) return 3;
+  return 4;
+}
+
+// ─── CORS ─────────────────────────────────────────────────────────────────────
 
 app.use((req, res, next) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
@@ -144,17 +149,49 @@ app.use((req, res, next) => {
   next();
 });
 
+// ─── Search endpoint ──────────────────────────────────────────────────────────
+
+const MAX_RESULTS = 200; // hard cap to prevent large responses
+
 app.get("/search", (req, res) => {
   const { q } = req.query;
-  const limit = parseInt(req.query.limit) || 50;
+  const limit = Math.min(parseInt(req.query.limit) || 50, MAX_RESULTS);
+
   if (!q || q.trim().length < 2) {
     return res.json({ results: [], total: variantCache.length, cacheBuiltAt });
   }
+
   const kw = normalise(q.trim());
-  const matched = variantCache.filter((v) => variantMatches(v, kw));
-  const sorted = sortByPriority(matched, kw);
-  res.json({ results: sorted.slice(0, limit), total: variantCache.length, cacheBuiltAt });
+  const tokens = kw.split(/\s+/).filter(Boolean);
+
+  // Step 1: exact phrase match (treat entire input as one keyword)
+  const phraseMatches = variantCache.filter(v => variantMatchesSingle(v, kw));
+
+  let results;
+  if (phraseMatches.length > 0) {
+    // Sort phrase matches by priority
+    results = phraseMatches.sort((a, b) => scoreVariant(a, kw) - scoreVariant(b, kw));
+  } else if (tokens.length > 1) {
+    // Step 2: multi-token AND match (each token must appear somewhere)
+    const multiMatches = variantCache.filter(v => variantMatchesAll(v, tokens));
+    // Sort by best single-token score
+    results = multiMatches.sort((a, b) => {
+      const sa = Math.min(...tokens.map(t => scoreVariant(a, t)));
+      const sb = Math.min(...tokens.map(t => scoreVariant(b, t)));
+      return sa - sb;
+    });
+  } else {
+    results = [];
+  }
+
+  res.json({
+    results: results.slice(0, limit),
+    total: variantCache.length,
+    cacheBuiltAt,
+  });
 });
+
+// ─── Variant inventory endpoint ───────────────────────────────────────────────
 
 const INVENTORY_QUERY = `
   query GetVariantInventory($id: ID!) {
@@ -203,6 +240,8 @@ app.get("/variant/:id", async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+
+// ─── OAuth ────────────────────────────────────────────────────────────────────
 
 app.get("/auth", (req, res) => {
   const { shop } = req.query;
