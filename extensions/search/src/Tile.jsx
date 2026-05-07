@@ -5,7 +5,7 @@ const TileComponent = () => {
   return (
     <Tile
       title="Search"
-      subtitle="SKU · Barcode · Title · Name"
+      subtitle="SKU · Title · Name · Wig Number"
       onPress={() => api.action.presentModal()}
       enabled
     />

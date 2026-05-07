@@ -10,7 +10,7 @@ automatically_update_urls_on_dev = true
 api_version = "2025-07"
 
 [access_scopes]
-scopes = "read_products,read_inventory"
+scopes = "read_products,read_inventory,read_customers"
 
 [auth]
 redirect_urls = [ "https://search-0wf4.onrender.com/auth/callback" ]

@@ -2,8 +2,20 @@ import express from "express";
 import crypto from "crypto";
 import fetch from "node-fetch";
 
+// ─── New modules (added for QR login + Apple Wallet) ──────────────────────────
+import { verifyRouter } from "./routes/verify.js";
+import { passRouter } from "./routes/pass.js";
+import { webhookRouter } from "./routes/webhook.js";
+
 const app = express();
+
+// Raw body needed for Shopify webhook HMAC validation — must come before express.json()
+app.use(
+  "/webhooks",
+  express.raw({ type: "application/json" }),
+);
 app.use(express.json());
+
 const PORT = process.env.PORT || 3000;
 
 const {
@@ -14,7 +26,29 @@ const {
   SHOP_ACCESS_TOKEN,
 } = process.env;
 
-const SCOPES = "read_products,read_inventory";
+const SCOPES = "read_products,read_inventory,read_customers,write_customers";
+
+// ─── Shared Shopify GraphQL helper (used by routes too) ───────────────────────
+export async function shopifyGraphQL(query, variables = {}) {
+  const resp = await fetch(
+    `https://${SHOP_DOMAIN}/admin/api/2025-07/graphql.json`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Shopify-Access-Token": SHOP_ACCESS_TOKEN,
+      },
+      body: JSON.stringify({ query, variables }),
+    }
+  );
+  if (!resp.ok) throw new Error(`Shopify API error: ${resp.status}`);
+  const json = await resp.json();
+  if (json.errors?.length)
+    throw new Error(json.errors.map((e) => e.message).join(", "));
+  return json.data;
+}
+
+// ─── Product cache (unchanged) ────────────────────────────────────────────────
 
 let variantCache = [];
 let cacheBuiltAt = null;
@@ -44,24 +78,6 @@ const PRODUCTS_QUERY = `
     }
   }
 `;
-
-async function shopifyGraphQL(query, variables = {}) {
-  const resp = await fetch(
-    `https://${SHOP_DOMAIN}/admin/api/2025-07/graphql.json`,
-    {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "X-Shopify-Access-Token": SHOP_ACCESS_TOKEN,
-      },
-      body: JSON.stringify({ query, variables }),
-    }
-  );
-  if (!resp.ok) throw new Error(`Shopify API error: ${resp.status}`);
-  const json = await resp.json();
-  if (json.errors?.length) throw new Error(json.errors.map((e) => e.message).join(", "));
-  return json.data;
-}
 
 async function buildCache() {
   if (cacheBuilding) return;
@@ -112,13 +128,14 @@ setInterval(buildCache, 12 * 60 * 60 * 1000);
 
 function normalise(str) {
   if (!str) return "";
-  return str.toLowerCase().normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "").replace(/\s+/g, " ").trim();
+  return str
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
-// ─── Match helpers ────────────────────────────────────────────────────────────
-
-// Single keyword: variant contains kw in any field
 function variantMatchesSingle(variant, kw) {
   return (
     normalise(variant.customName).includes(kw) ||
@@ -128,9 +145,8 @@ function variantMatchesSingle(variant, kw) {
   );
 }
 
-// Multi-keyword (AND): every token must appear somewhere in the variant
 function variantMatchesAll(variant, tokens) {
-  return tokens.every(t => variantMatchesSingle(variant, t));
+  return tokens.every((t) => variantMatchesSingle(variant, t));
 }
 
 function scoreVariant(variant, kw) {
@@ -149,9 +165,15 @@ app.use((req, res, next) => {
   next();
 });
 
-// ─── Search endpoint ──────────────────────────────────────────────────────────
+// ─── New route modules ────────────────────────────────────────────────────────
 
-const MAX_RESULTS = 200; // hard cap to prevent large responses
+app.use("/api", verifyRouter);   // POST /api/verify
+app.use("/api", passRouter);     // POST /api/pass/generate  GET /api/pass/:customerId
+app.use("/webhooks", webhookRouter); // POST /webhooks/orders
+
+// ─── Search endpoint (unchanged) ─────────────────────────────────────────────
+
+const MAX_RESULTS = 200;
 
 app.get("/search", (req, res) => {
   const { q } = req.query;
@@ -164,20 +186,22 @@ app.get("/search", (req, res) => {
   const kw = normalise(q.trim());
   const tokens = kw.split(/\s+/).filter(Boolean);
 
-  // Step 1: exact phrase match (treat entire input as one keyword)
-  const phraseMatches = variantCache.filter(v => variantMatchesSingle(v, kw));
+  const phraseMatches = variantCache.filter((v) =>
+    variantMatchesSingle(v, kw)
+  );
 
   let results;
   if (phraseMatches.length > 0) {
-    // Sort phrase matches by priority
-    results = phraseMatches.sort((a, b) => scoreVariant(a, kw) - scoreVariant(b, kw));
+    results = phraseMatches.sort(
+      (a, b) => scoreVariant(a, kw) - scoreVariant(b, kw)
+    );
   } else if (tokens.length > 1) {
-    // Step 2: multi-token AND match (each token must appear somewhere)
-    const multiMatches = variantCache.filter(v => variantMatchesAll(v, tokens));
-    // Sort by best single-token score
+    const multiMatches = variantCache.filter((v) =>
+      variantMatchesAll(v, tokens)
+    );
     results = multiMatches.sort((a, b) => {
-      const sa = Math.min(...tokens.map(t => scoreVariant(a, t)));
-      const sb = Math.min(...tokens.map(t => scoreVariant(b, t)));
+      const sa = Math.min(...tokens.map((t) => scoreVariant(a, t)));
+      const sb = Math.min(...tokens.map((t) => scoreVariant(b, t)));
       return sa - sb;
     });
   } else {
@@ -191,7 +215,7 @@ app.get("/search", (req, res) => {
   });
 });
 
-// ─── Variant inventory endpoint ───────────────────────────────────────────────
+// ─── Variant inventory endpoint (unchanged) ───────────────────────────────────
 
 const INVENTORY_QUERY = `
   query GetVariantInventory($id: ID!) {
@@ -224,11 +248,14 @@ app.get("/variant/:id", async (req, res) => {
     const data = await shopifyGraphQL(INVENTORY_QUERY, { id: variantGid });
     const variant = data.productVariant;
     if (!variant) return res.status(404).json({ error: "Variant not found" });
-    const locations = variant.inventoryItem.inventoryLevels.nodes.map((level) => ({
-      locationId: level.location.id.split("/").pop(),
-      locationName: level.location.name,
-      available: level.quantities.find(q => q.name === "available")?.quantity ?? 0,
-    }));
+    const locations = variant.inventoryItem.inventoryLevels.nodes.map(
+      (level) => ({
+        locationId: level.location.id.split("/").pop(),
+        locationName: level.location.name,
+        available:
+          level.quantities.find((q) => q.name === "available")?.quantity ?? 0,
+      })
+    );
     res.json({
       variantId: req.params.id,
       title: variant.title,
@@ -241,7 +268,7 @@ app.get("/variant/:id", async (req, res) => {
   }
 });
 
-// ─── OAuth ────────────────────────────────────────────────────────────────────
+// ─── OAuth (unchanged) ────────────────────────────────────────────────────────
 
 app.get("/auth", (req, res) => {
   const { shop } = req.query;
@@ -263,17 +290,29 @@ app.get("/auth/callback", async (req, res) => {
     .sort(([a], [b]) => a.localeCompare(b))
     .map(([k, v]) => `${k}=${v}`)
     .join("&");
-  const digest = crypto.createHmac("sha256", SHOPIFY_API_SECRET).update(params).digest("hex");
+  const digest = crypto
+    .createHmac("sha256", SHOPIFY_API_SECRET)
+    .update(params)
+    .digest("hex");
   if (digest !== hmac) return res.status(403).send("HMAC validation failed");
-  const tokenRes = await fetch(`https://${shop}/admin/oauth/access_token`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ client_id: SHOPIFY_API_KEY, client_secret: SHOPIFY_API_SECRET, code }),
-  });
+  const tokenRes = await fetch(
+    `https://${shop}/admin/oauth/access_token`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        client_id: SHOPIFY_API_KEY,
+        client_secret: SHOPIFY_API_SECRET,
+        code,
+      }),
+    }
+  );
   const { access_token } = await tokenRes.json();
   console.log(`Installed on ${shop}: ${access_token}`);
   res.redirect(`https://${shop}/admin/apps`);
 });
+
+// ─── Cache utils (unchanged) ──────────────────────────────────────────────────
 
 app.get("/cache/refresh", (req, res) => {
   buildCache();

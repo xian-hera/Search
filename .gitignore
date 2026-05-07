@@ -1,0 +1,10 @@
+# Existing
+node_modules/
+dist/
+
+# Apple certificates — NEVER commit these
+certs/
+*.p12
+*.pem
+*.cer
+*.certSigningRequest
