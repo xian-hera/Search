@@ -370,7 +370,7 @@ app.get("/api/pass/generate/:customerId", async (req, res) => {
     }, {
       serialNumber: `hera-${customerId}`,
     });
-    
+
     pass.type = "storeCard";
 
     pass.setBarcodes({
@@ -388,6 +388,8 @@ app.get("/api/pass/generate/:customerId", async (req, res) => {
       "Content-Type": "application/vnd.apple.pkpass",
       "Content-Disposition": `attachment; filename="hera-loyalty.pkpass"`,
       "Content-Length": buffer.length,
+      "Cache-Control": "no-cache",
+      "Pragma": "no-cache",
     });
     res.send(buffer);
 
