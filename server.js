@@ -2,7 +2,6 @@ import express from "express";
 import crypto from "crypto";
 import fetch from "node-fetch";
 import { PKPass } from "passkit-generator";
-import { readFileSync } from "fs";
 import { join, dirname } from "path";
 import { fileURLToPath } from "url";
 
@@ -23,10 +22,10 @@ const {
 
 const SCOPES = "read_products,read_inventory,read_customers";
 
-// ─── Apple Wallet certificates ────────────────────────────────────────────────
-const wwdr       = readFileSync(join(__dirname, "certs/wwdr.pem"));
-const signerCert = readFileSync(join(__dirname, "certs/signerCert.pem"));
-const signerKey  = readFileSync(join(__dirname, "certs/signerKey.pem"));
+// ─── Apple Wallet certificates (from environment variables) ───────────────────
+const wwdr       = Buffer.from(process.env.WWDR_PEM_B64, "base64");
+const signerCert = Buffer.from(process.env.SIGNER_CERT_B64, "base64");
+const signerKey  = Buffer.from(process.env.SIGNER_KEY_B64, "base64");
 
 // ─── Product cache ────────────────────────────────────────────────────────────
 
