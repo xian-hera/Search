@@ -401,16 +401,11 @@ app.get("/api/pass/generate/:customerId", async (req, res) => {
   }
 });
 
-// ─── Apple Wallet landing page (embeds pass as base64, JS triggers download) ──
+// ─── Apple Wallet landing page ────────────────────────────────────────────────
 
-app.get("/wallet/:customerId", async (req, res) => {
+app.get("/wallet/:customerId", (req, res) => {
   const { customerId } = req.params;
-
-  try {
-    const buffer = await generatePassBuffer(customerId);
-    const base64 = buffer.toString("base64");
-
-    res.send(`<!DOCTYPE html>
+  res.send(`<!DOCTYPE html>
 <html>
 <head>
   <meta charset="utf-8">
@@ -431,12 +426,7 @@ app.get("/wallet/:customerId", async (req, res) => {
     }
     h1 { font-size: 22px; color: #1d1d1f; margin-bottom: 8px; }
     p { font-size: 15px; color: #6e6e73; margin-bottom: 32px; }
-    button {
-      background: none;
-      border: none;
-      cursor: pointer;
-      padding: 0;
-    }
+    button { background: none; border: none; cursor: pointer; padding: 0; }
     button img { width: 180px; }
   </style>
 </head>
@@ -448,29 +438,11 @@ app.get("/wallet/:customerId", async (req, res) => {
   </button>
   <script>
     function downloadPass() {
-      const base64 = "${base64}";
-      const binary = atob(base64);
-      const bytes = new Uint8Array(binary.length);
-      for (let i = 0; i < binary.length; i++) {
-        bytes[i] = binary.charCodeAt(i);
-      }
-      const blob = new Blob([bytes], { type: "application/vnd.apple.pkpass" });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = "hera-loyalty.pkpass";
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      URL.revokeObjectURL(url);
+      window.location.href = "/api/pass/generate/${customerId}";
     }
   </script>
 </body>
 </html>`);
-  } catch (err) {
-    console.error("Wallet page failed:", err.message);
-    res.status(500).send("Error generating pass");
-  }
 });
 
 // ─── OAuth ────────────────────────────────────────────────────────────────────
