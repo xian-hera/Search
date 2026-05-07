@@ -8,31 +8,7 @@
   "backgroundColor": "rgb(227, 42, 105)",
   "labelColor": "rgb(255, 255, 255)",
   "storeCard": {
-    "primaryFields": [
-      {
-        "key": "points",
-        "label": "Points",
-        "value": "0"
-      }
-    ],
-    "secondaryFields": [
-      {
-        "key": "name",
-        "label": "Member",
-        "value": ""
-      }
-    ]
-  },
-  "barcode": {
-    "message": "",
-    "format": "PKBarcodeFormatQR",
-    "messageEncoding": "iso-8859-1"
-  },
-  "barcodes": [
-    {
-      "message": "",
-      "format": "PKBarcodeFormatQR",
-      "messageEncoding": "iso-8859-1"
-    }
-  ]
+    "primaryFields": [],
+    "secondaryFields": []
+  }
 }
