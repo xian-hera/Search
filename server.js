@@ -370,6 +370,8 @@ app.get("/api/pass/generate/:customerId", async (req, res) => {
     }, {
       serialNumber: `hera-${customerId}`,
     });
+    
+    pass.type = "storeCard";
 
     pass.setBarcodes({
       message: qrToken,
