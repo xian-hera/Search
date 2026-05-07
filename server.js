@@ -386,7 +386,6 @@ app.get("/api/pass/generate/:customerId", async (req, res) => {
 
     res.set({
       "Content-Type": "application/vnd.apple.pkpass",
-      
       "Content-Length": buffer.length,
       "Cache-Control": "no-store",
     });
@@ -396,6 +395,43 @@ app.get("/api/pass/generate/:customerId", async (req, res) => {
     console.error("Pass generation failed:", err.message);
     res.status(500).json({ error: err.message });
   }
+});
+
+// ─── Apple Wallet landing page ────────────────────────────────────────────────
+
+app.get("/wallet/:customerId", (req, res) => {
+  const { customerId } = req.params;
+  res.send(`<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Hera Beauté Loyalty Card</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      background: #f5f5f7;
+      padding: 24px;
+    }
+    h1 { font-size: 22px; color: #1d1d1f; margin-bottom: 8px; text-align: center; }
+    p { font-size: 15px; color: #6e6e73; margin-bottom: 32px; text-align: center; }
+    a img { width: 180px; display: block; }
+  </style>
+</head>
+<body>
+  <h1>Hera Beauté</h1>
+  <p>Tap below to add your loyalty card to Apple Wallet.</p>
+  <a href="/api/pass/generate/${customerId}">
+    <img src="https://developer.apple.com/wallet/add-to-apple-wallet-button.png" alt="Add to Apple Wallet">
+  </a>
+</body>
+</html>`);
 });
 
 // ─── OAuth ────────────────────────────────────────────────────────────────────
