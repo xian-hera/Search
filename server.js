@@ -386,10 +386,9 @@ app.get("/api/pass/generate/:customerId", async (req, res) => {
 
     res.set({
       "Content-Type": "application/vnd.apple.pkpass",
-      "Content-Disposition": `attachment; filename="hera-loyalty.pkpass"`,
+      
       "Content-Length": buffer.length,
-      "Cache-Control": "no-cache",
-      "Pragma": "no-cache",
+      "Cache-Control": "no-store",
     });
     res.send(buffer);
 
