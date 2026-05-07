@@ -166,6 +166,38 @@ function buildQrToken(customerId) {
   return `${payloadB64}.${hmac}`;
 }
 
+// ─── Pass builder helper ──────────────────────────────────────────────────────
+
+async function generatePassBuffer(customerId) {
+  const gid = `gid://shopify/Customer/${customerId}`;
+  const data = await shopifyGraphQL(PASS_CUSTOMER_QUERY, { id: gid });
+  const customer = data.customer;
+  if (!customer) throw new Error("Customer not found");
+
+  const points = customer.loyaltyPoints?.value ?? "0";
+  const qrToken = buildQrToken(customerId);
+
+  const pass = await PKPass.from({
+    model: join(__dirname, "passkit/loyalty.pass"),
+    certificates: { wwdr, signerCert, signerKey },
+  }, {
+    serialNumber: `hera-${customerId}`,
+  });
+
+  pass.type = "storeCard";
+
+  pass.setBarcodes({
+    message: qrToken,
+    format: "PKBarcodeFormatQR",
+    messageEncoding: "iso-8859-1",
+  });
+
+  pass.primaryFields.push({ key: "points", label: "Points", value: points });
+  pass.secondaryFields.push({ key: "name", label: "Member", value: `${customer.firstName} ${customer.lastName}` });
+
+  return pass.getAsBuffer();
+}
+
 // ─── CORS ─────────────────────────────────────────────────────────────────────
 
 app.use((req, res, next) => {
@@ -356,52 +388,29 @@ app.get("/api/pass/generate/:customerId", async (req, res) => {
   if (!customerId) return res.status(400).json({ error: "Missing customerId" });
 
   try {
-    const gid = `gid://shopify/Customer/${customerId}`;
-    const data = await shopifyGraphQL(PASS_CUSTOMER_QUERY, { id: gid });
-    const customer = data.customer;
-    if (!customer) return res.status(404).json({ error: "Customer not found" });
-
-    const points = customer.loyaltyPoints?.value ?? "0";
-    const qrToken = buildQrToken(customerId);
-
-    const pass = await PKPass.from({
-      model: join(__dirname, "passkit/loyalty.pass"),
-      certificates: { wwdr, signerCert, signerKey },
-    }, {
-      serialNumber: `hera-${customerId}`,
-    });
-
-    pass.type = "storeCard";
-
-    pass.setBarcodes({
-      message: qrToken,
-      format: "PKBarcodeFormatQR",
-      messageEncoding: "iso-8859-1",
-    });
-
-    pass.primaryFields.push({ key: "points", label: "Points", value: points });
-    pass.secondaryFields.push({ key: "name", label: "Member", value: `${customer.firstName} ${customer.lastName}` });
-
-    const buffer = pass.getAsBuffer();
-
+    const buffer = await generatePassBuffer(customerId);
     res.set({
       "Content-Type": "application/vnd.apple.pkpass",
       "Content-Length": buffer.length,
       "Cache-Control": "no-store",
     });
     res.send(buffer);
-
   } catch (err) {
     console.error("Pass generation failed:", err.message);
     res.status(500).json({ error: err.message });
   }
 });
 
-// ─── Apple Wallet landing page ────────────────────────────────────────────────
+// ─── Apple Wallet landing page (embeds pass as base64, JS triggers download) ──
 
-app.get("/wallet/:customerId", (req, res) => {
+app.get("/wallet/:customerId", async (req, res) => {
   const { customerId } = req.params;
-  res.send(`<!DOCTYPE html>
+
+  try {
+    const buffer = await generatePassBuffer(customerId);
+    const base64 = buffer.toString("base64");
+
+    res.send(`<!DOCTYPE html>
 <html>
 <head>
   <meta charset="utf-8">
@@ -418,20 +427,50 @@ app.get("/wallet/:customerId", (req, res) => {
       min-height: 100vh;
       background: #f5f5f7;
       padding: 24px;
+      text-align: center;
     }
-    h1 { font-size: 22px; color: #1d1d1f; margin-bottom: 8px; text-align: center; }
-    p { font-size: 15px; color: #6e6e73; margin-bottom: 32px; text-align: center; }
-    a img { width: 180px; display: block; }
+    h1 { font-size: 22px; color: #1d1d1f; margin-bottom: 8px; }
+    p { font-size: 15px; color: #6e6e73; margin-bottom: 32px; }
+    button {
+      background: none;
+      border: none;
+      cursor: pointer;
+      padding: 0;
+    }
+    button img { width: 180px; }
   </style>
 </head>
 <body>
   <h1>Hera Beauté</h1>
   <p>Tap below to add your loyalty card to Apple Wallet.</p>
-  <a href="/api/pass/generate/${customerId}">
+  <button onclick="downloadPass()">
     <img src="https://developer.apple.com/wallet/add-to-apple-wallet-button.png" alt="Add to Apple Wallet">
-  </a>
+  </button>
+  <script>
+    function downloadPass() {
+      const base64 = "${base64}";
+      const binary = atob(base64);
+      const bytes = new Uint8Array(binary.length);
+      for (let i = 0; i < binary.length; i++) {
+        bytes[i] = binary.charCodeAt(i);
+      }
+      const blob = new Blob([bytes], { type: "application/vnd.apple.pkpass" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = "hera-loyalty.pkpass";
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    }
+  </script>
 </body>
 </html>`);
+  } catch (err) {
+    console.error("Wallet page failed:", err.message);
+    res.status(500).send("Error generating pass");
+  }
 });
 
 // ─── OAuth ────────────────────────────────────────────────────────────────────
