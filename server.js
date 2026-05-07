@@ -377,14 +377,8 @@ app.get("/api/pass/generate/:customerId", async (req, res) => {
       messageEncoding: "iso-8859-1",
     });
 
-    pass.setPassStructureDictionary("storeCard", {
-      primaryFields: [
-        { key: "points", label: "Points", value: points }
-      ],
-      secondaryFields: [
-        { key: "name", label: "Member", value: `${customer.firstName} ${customer.lastName}` }
-      ],
-    });
+    pass.primaryFields.push({ key: "points", label: "Points", value: points });
+    pass.secondaryFields.push({ key: "name", label: "Member", value: `${customer.firstName} ${customer.lastName}` });
 
     const buffer = pass.getAsBuffer();
 
