@@ -150,19 +150,19 @@ function scoreVariant(variant, kw) {
   return 4;
 }
 
-// ─── Token builder ────────────────────────────────────────────────────────────
+// ─── Token builder (shortened for compact barcode) ────────────────────────────
 
-function buildQrToken(customerId) {
+function buildToken(customerId) {
   const payload = {
-    customer_id: customerId,
-    shop: SHOP_DOMAIN,
-    issued_at: Date.now(),
+    c: customerId,
+    t: Date.now(),
   };
   const payloadB64 = Buffer.from(JSON.stringify(payload)).toString("base64");
   const hmac = crypto
     .createHmac("sha256", QR_SECRET)
     .update(payloadB64)
-    .digest("hex");
+    .digest("hex")
+    .slice(0, 16);
   return `${payloadB64}.${hmac}`;
 }
 
@@ -174,7 +174,7 @@ const PASS_CUSTOMER_QUERY = `
       id
       firstName
       lastName
-      loyaltyPoints: metafield(namespace: "loyalty", key: "points") {
+      loyaltyPoints: metafield(namespace: "custom", key: "points_balance") {
         value
       }
     }
@@ -188,7 +188,7 @@ async function generatePassBuffer(customerId) {
   if (!customer) throw new Error("Customer not found");
 
   const points = customer.loyaltyPoints?.value ?? "0";
-  const token = buildQrToken(customerId);
+  const token = buildToken(customerId);
 
   const pass = await PKPass.from({
     model: join(__dirname, "passkit/loyalty.pass"),
@@ -319,7 +319,7 @@ const CUSTOMER_QUERY = `
       lastName
       email
       phone
-      loyaltyPoints: metafield(namespace: "loyalty", key: "points") {
+      loyaltyPoints: metafield(namespace: "custom", key: "points_balance") {
         value
       }
     }
@@ -339,7 +339,8 @@ app.post("/api/verify", async (req, res) => {
   const expectedHmac = crypto
     .createHmac("sha256", QR_SECRET)
     .update(payloadB64)
-    .digest("hex");
+    .digest("hex")
+    .slice(0, 16);
 
   let valid = false;
   try {
@@ -360,7 +361,7 @@ app.post("/api/verify", async (req, res) => {
     return res.status(400).json({ error: "Malformed payload" });
   }
 
-  const { customer_id } = payload;
+  const { c: customer_id } = payload;
 
   try {
     const gid = `gid://shopify/Customer/${customer_id}`;
@@ -420,27 +421,19 @@ app.get("/wallet/:customerId", (req, res) => {
       align-items: center;
       justify-content: center;
       min-height: 100vh;
-      background: #f5f5f7;
+      background: #ffffff;
       padding: 24px;
-      text-align: center;
     }
-    h1 { font-size: 22px; color: #1d1d1f; margin-bottom: 8px; }
-    p { font-size: 15px; color: #6e6e73; margin-bottom: 32px; }
-    button { background: none; border: none; cursor: pointer; padding: 0; }
-    button img { width: 180px; }
+    .logo { width: 200px; margin-bottom: 48px; }
+    .btn { background: none; border: none; cursor: pointer; padding: 0; }
+    .btn img { width: 180px; }
   </style>
 </head>
 <body>
-  <h1>Hera Beauté</h1>
-  <p>Tap below to add your loyalty card to Apple Wallet.</p>
-  <button onclick="downloadPass()">
-    <img src="https://developer.apple.com/wallet/add-to-apple-wallet-button.png" alt="Add to Apple Wallet">
+  <img class="logo" src="https://cdn.shopify.com/s/files/1/1443/5388/files/Logo_bdd93355-62cf-412d-81f4-6b24fc343bf7.svg?v=1761925608" alt="Hera Beauté">
+  <button class="btn" onclick="window.location.href='/api/pass/generate/${customerId}'">
+    <img src="https://cdn.shopify.com/s/files/1/1443/5388/files/add_button.png?v=1778255486" alt="Add to Apple Wallet">
   </button>
-  <script>
-    function downloadPass() {
-      window.location.href = "/api/pass/generate/${customerId}";
-    }
-  </script>
 </body>
 </html>`);
 });
