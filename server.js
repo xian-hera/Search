@@ -150,20 +150,34 @@ function scoreVariant(variant, kw) {
   return 4;
 }
 
-// ─── Token builder (shortened for compact barcode) ────────────────────────────
+// ─── Token builder (numeric, compact) ────────────────────────────────────────
+// Format: {customerId}{6-digit timestamp}{8-digit numeric HMAC}
+// Example: 8797737189686123456 12345678 → total ~27 digits
 
 function buildToken(customerId) {
-  const payload = {
-    c: customerId,
-    t: Date.now(),
-  };
-  const payloadB64 = Buffer.from(JSON.stringify(payload)).toString("base64");
-  const hmac = crypto
+  const ts = Date.now().toString().slice(-6);
+  const hmacHex = crypto
     .createHmac("sha256", QR_SECRET)
-    .update(payloadB64)
-    .digest("hex")
-    .slice(0, 16);
-  return `${payloadB64}.${hmac}`;
+    .update(`${customerId}${ts}`)
+    .digest("hex");
+  // Convert first 4 bytes of HMAC to a numeric string (0-4294967295), zero-padded to 10 digits
+  const numericHmac = (parseInt(hmacHex.slice(0, 8), 16) % 100000000).toString().padStart(8, "0");
+  return `${customerId}${ts}${numericHmac}`;
+}
+
+function verifyToken(token, customerId) {
+  // token = {customerId}{ts6}{hmac8}
+  const idLen = customerId.toString().length;
+  const ts = token.slice(idLen, idLen + 6);
+  const receivedHmac = token.slice(idLen + 6);
+
+  const hmacHex = crypto
+    .createHmac("sha256", QR_SECRET)
+    .update(`${customerId}${ts}`)
+    .digest("hex");
+  const expectedHmac = (parseInt(hmacHex.slice(0, 8), 16) % 100000000).toString().padStart(8, "0");
+
+  return receivedHmac === expectedHmac;
 }
 
 // ─── Pass builder helper ──────────────────────────────────────────────────────
@@ -201,7 +215,7 @@ async function generatePassBuffer(customerId) {
 
   pass.setBarcodes({
     message: token,
-    format: "PKBarcodeFormatCode128",
+    format: "PKBarcodeFormatPDF417",
     messageEncoding: "iso-8859-1",
   });
 
@@ -330,38 +344,21 @@ app.post("/api/verify", async (req, res) => {
   const { token } = req.body;
   if (!token) return res.status(400).json({ error: "Missing token" });
 
-  const lastDot = token.lastIndexOf(".");
-  if (lastDot === -1) return res.status(400).json({ error: "Invalid token format" });
+  // Token format: {customerId}{ts6}{hmac8}
+  // customerId is at least 8 digits, ts is 6 digits, hmac is 8 digits
+  if (token.length < 22) return res.status(400).json({ error: "Invalid token format" });
 
-  const payloadB64 = token.slice(0, lastDot);
-  const receivedHmac = token.slice(lastDot + 1);
+  const hmac8 = token.slice(-8);
+  const ts6 = token.slice(-14, -8);
+  const customer_id = token.slice(0, -14);
 
-  const expectedHmac = crypto
-    .createHmac("sha256", QR_SECRET)
-    .update(payloadB64)
-    .digest("hex")
-    .slice(0, 16);
+  if (!customer_id || !ts6 || !hmac8) {
+    return res.status(400).json({ error: "Invalid token format" });
+  }
 
-  let valid = false;
-  try {
-    valid = crypto.timingSafeEqual(
-      Buffer.from(receivedHmac, "hex"),
-      Buffer.from(expectedHmac, "hex")
-    );
-  } catch {
+  if (!verifyToken(token, customer_id)) {
     return res.status(401).json({ error: "Invalid signature" });
   }
-
-  if (!valid) return res.status(401).json({ error: "Invalid signature" });
-
-  let payload;
-  try {
-    payload = JSON.parse(Buffer.from(payloadB64, "base64").toString("utf8"));
-  } catch {
-    return res.status(400).json({ error: "Malformed payload" });
-  }
-
-  const { c: customer_id } = payload;
 
   try {
     const gid = `gid://shopify/Customer/${customer_id}`;
