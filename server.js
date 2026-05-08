@@ -150,7 +150,7 @@ function scoreVariant(variant, kw) {
   return 4;
 }
 
-// ─── QR token builder ─────────────────────────────────────────────────────────
+// ─── Token builder ────────────────────────────────────────────────────────────
 
 function buildQrToken(customerId) {
   const payload = {
@@ -168,6 +168,19 @@ function buildQrToken(customerId) {
 
 // ─── Pass builder helper ──────────────────────────────────────────────────────
 
+const PASS_CUSTOMER_QUERY = `
+  query GetCustomer($id: ID!) {
+    customer(id: $id) {
+      id
+      firstName
+      lastName
+      loyaltyPoints: metafield(namespace: "loyalty", key: "points") {
+        value
+      }
+    }
+  }
+`;
+
 async function generatePassBuffer(customerId) {
   const gid = `gid://shopify/Customer/${customerId}`;
   const data = await shopifyGraphQL(PASS_CUSTOMER_QUERY, { id: gid });
@@ -175,7 +188,7 @@ async function generatePassBuffer(customerId) {
   if (!customer) throw new Error("Customer not found");
 
   const points = customer.loyaltyPoints?.value ?? "0";
-  const qrToken = buildQrToken(customerId);
+  const token = buildQrToken(customerId);
 
   const pass = await PKPass.from({
     model: join(__dirname, "passkit/loyalty.pass"),
@@ -187,8 +200,8 @@ async function generatePassBuffer(customerId) {
   pass.type = "storeCard";
 
   pass.setBarcodes({
-    message: qrToken,
-    format: "PKBarcodeFormatQR",
+    message: token,
+    format: "PKBarcodeFormatCode128",
     messageEncoding: "iso-8859-1",
   });
 
@@ -369,19 +382,6 @@ app.post("/api/verify", async (req, res) => {
 });
 
 // ─── Apple Wallet Pass generate ───────────────────────────────────────────────
-
-const PASS_CUSTOMER_QUERY = `
-  query GetCustomer($id: ID!) {
-    customer(id: $id) {
-      id
-      firstName
-      lastName
-      loyaltyPoints: metafield(namespace: "loyalty", key: "points") {
-        value
-      }
-    }
-  }
-`;
 
 app.get("/api/pass/generate/:customerId", async (req, res) => {
   const { customerId } = req.params;
