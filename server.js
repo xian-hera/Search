@@ -462,7 +462,6 @@ app.get("/wallet/:customerId", (req, res) => {
 // ─── Shopify orders/paid webhook → sync Smile points to metafield ─────────────
 
 app.post("/webhooks/orders", async (req, res) => {
-  // Verify Shopify HMAC
   const hmacHeader = req.headers["x-shopify-hmac-sha256"];
   const digest = crypto
     .createHmac("sha256", SHOPIFY_API_SECRET)
@@ -486,16 +485,34 @@ app.post("/webhooks/orders", async (req, res) => {
 
   res.status(200).send("OK");
 
-  // Run sync in background after responding
   syncSmilePoints(shopifyCustomerId).catch(err =>
     console.error("Smile sync error:", err.message)
   );
 });
 
 async function syncSmilePoints(shopifyCustomerId) {
-  // 1. Find Smile customer by Shopify customer ID
+  // 1. Get customer email from Shopify
+  const shopifyResp = await fetch(
+    `https://${SHOP_DOMAIN}/admin/api/2025-07/customers/${shopifyCustomerId}.json`,
+    { headers: { "X-Shopify-Access-Token": SHOP_ACCESS_TOKEN } }
+  );
+
+  if (!shopifyResp.ok) {
+    console.error(`Shopify customer fetch error: ${shopifyResp.status}`);
+    return;
+  }
+
+  const shopifyData = await shopifyResp.json();
+  const email = shopifyData.customer?.email;
+
+  if (!email) {
+    console.log(`No email for customer ${shopifyCustomerId}, skipping Smile sync`);
+    return;
+  }
+
+  // 2. Look up customer in Smile by email
   const smileResp = await fetch(
-    `https://api.smile.io/v1/customers?shopify_customer_id=${shopifyCustomerId}`,
+    `https://api.smile.io/v1/customers?email=${encodeURIComponent(email)}`,
     { headers: { Authorization: `Bearer ${SMILE_API_KEY}` } }
   );
 
@@ -508,14 +525,14 @@ async function syncSmilePoints(shopifyCustomerId) {
   const smileCustomer = smileData.customers?.[0];
 
   if (!smileCustomer) {
-    console.log(`No Smile customer found for Shopify ID ${shopifyCustomerId}`);
+    console.log(`No Smile customer found for email ${email}`);
     return;
   }
 
   const pointsBalance = smileCustomer.points_balance ?? 0;
-  console.log(`Syncing Smile points for customer ${shopifyCustomerId}: ${pointsBalance}`);
+  console.log(`Syncing Smile points for customer ${shopifyCustomerId} (${email}): ${pointsBalance}`);
 
-  // 2. Write points to Shopify metafield
+  // 3. Write points to Shopify metafield
   const metafieldResp = await fetch(
     `https://${SHOP_DOMAIN}/admin/api/2025-07/customers/${shopifyCustomerId}/metafields.json`,
     { headers: { "X-Shopify-Access-Token": SHOP_ACCESS_TOKEN } }
