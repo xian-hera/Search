@@ -8,7 +8,11 @@ import { fileURLToPath } from "url";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
 const app = express();
+
+// Raw body needed for Shopify webhook HMAC validation
+app.use("/webhooks", express.raw({ type: "application/json" }));
 app.use(express.json());
+
 const PORT = process.env.PORT || 3000;
 
 const {
@@ -18,9 +22,10 @@ const {
   SHOP_DOMAIN,
   SHOP_ACCESS_TOKEN,
   QR_SECRET,
+  SMILE_API_KEY,
 } = process.env;
 
-const SCOPES = "read_products,read_inventory,read_customers";
+const SCOPES = "read_products,read_inventory,read_customers,write_customers,read_orders";
 
 // ─── Apple Wallet certificates (from environment variables) ───────────────────
 const wwdr       = Buffer.from(process.env.WWDR_PEM_B64, "base64");
@@ -151,8 +156,6 @@ function scoreVariant(variant, kw) {
 }
 
 // ─── Token builder (numeric, compact) ────────────────────────────────────────
-// Format: {customerId}{6-digit timestamp}{8-digit numeric HMAC}
-// Example: 8797737189686123456 12345678 → total ~27 digits
 
 function buildToken(customerId) {
   const ts = Date.now().toString().slice(-6);
@@ -160,23 +163,19 @@ function buildToken(customerId) {
     .createHmac("sha256", QR_SECRET)
     .update(`${customerId}${ts}`)
     .digest("hex");
-  // Convert first 4 bytes of HMAC to a numeric string (0-4294967295), zero-padded to 10 digits
   const numericHmac = (parseInt(hmacHex.slice(0, 8), 16) % 100000000).toString().padStart(8, "0");
   return `${customerId}${ts}${numericHmac}`;
 }
 
 function verifyToken(token, customerId) {
-  // token = {customerId}{ts6}{hmac8}
   const idLen = customerId.toString().length;
   const ts = token.slice(idLen, idLen + 6);
   const receivedHmac = token.slice(idLen + 6);
-
   const hmacHex = crypto
     .createHmac("sha256", QR_SECRET)
     .update(`${customerId}${ts}`)
     .digest("hex");
   const expectedHmac = (parseInt(hmacHex.slice(0, 8), 16) % 100000000).toString().padStart(8, "0");
-
   return receivedHmac === expectedHmac;
 }
 
@@ -344,17 +343,11 @@ app.post("/api/verify", async (req, res) => {
   const { token } = req.body;
   if (!token) return res.status(400).json({ error: "Missing token" });
 
-  // Token format: {customerId}{ts6}{hmac8}
-  // customerId is at least 8 digits, ts is 6 digits, hmac is 8 digits
   if (token.length < 22) return res.status(400).json({ error: "Invalid token format" });
 
-  const hmac8 = token.slice(-8);
-  const ts6 = token.slice(-14, -8);
   const customer_id = token.slice(0, -14);
 
-  if (!customer_id || !ts6 || !hmac8) {
-    return res.status(400).json({ error: "Invalid token format" });
-  }
+  if (!customer_id) return res.status(400).json({ error: "Invalid token format" });
 
   if (!verifyToken(token, customer_id)) {
     return res.status(401).json({ error: "Invalid signature" });
@@ -403,6 +396,9 @@ app.get("/api/pass/generate/:customerId", async (req, res) => {
 
 app.get("/wallet/:customerId", (req, res) => {
   const { customerId } = req.params;
+  const ua = req.headers["user-agent"] || "";
+  const isSafari = /Safari/.test(ua) && !/Chrome/.test(ua) && !/CriOS/.test(ua) && !/FxiOS/.test(ua);
+
   res.send(`<!DOCTYPE html>
 <html>
 <head>
@@ -420,20 +416,153 @@ app.get("/wallet/:customerId", (req, res) => {
       min-height: 100vh;
       background: #ffffff;
       padding: 24px;
+      text-align: center;
     }
     .logo { width: 200px; margin-bottom: 48px; }
-    .btn { background: none; border: none; cursor: pointer; padding: 0; }
+    .btn { background: none; border: none; cursor: pointer; padding: 0; margin-top: 24px; }
     .btn img { width: 180px; }
+    .notice {
+      font-size: 13px;
+      color: #888;
+      line-height: 1.6;
+      max-width: 280px;
+      margin-bottom: 8px;
+    }
+    .arrow {
+      font-size: 28px;
+      position: fixed;
+      top: 12px;
+      right: 16px;
+      animation: bounce 1s infinite;
+    }
+    @keyframes bounce {
+      0%, 100% { transform: translateY(0); }
+      50% { transform: translateY(-6px); }
+    }
   </style>
 </head>
 <body>
   <img class="logo" src="https://cdn.shopify.com/s/files/1/1443/5388/files/Logo_bdd93355-62cf-412d-81f4-6b24fc343bf7.svg?v=1761925608" alt="Hera Beauté">
+
+  ${!isSafari ? `
+  <div class="arrow">↗</div>
+  <p class="notice">
+    Please open this page in Safari to add your card.<br>
+    Veuillez ouvrir cette page dans Safari pour ajouter votre carte.
+  </p>
+  ` : ""}
+
   <button class="btn" onclick="window.location.href='/api/pass/generate/${customerId}'">
     <img src="https://cdn.shopify.com/s/files/1/1443/5388/files/add_button.png?v=1778255486" alt="Add to Apple Wallet">
   </button>
 </body>
 </html>`);
 });
+
+// ─── Shopify orders/paid webhook → sync Smile points to metafield ─────────────
+
+app.post("/webhooks/orders", async (req, res) => {
+  // Verify Shopify HMAC
+  const hmacHeader = req.headers["x-shopify-hmac-sha256"];
+  const digest = crypto
+    .createHmac("sha256", SHOPIFY_API_SECRET)
+    .update(req.body)
+    .digest("base64");
+
+  if (digest !== hmacHeader) {
+    console.warn("Webhook HMAC mismatch");
+    return res.status(401).send("Unauthorized");
+  }
+
+  let order;
+  try {
+    order = JSON.parse(req.body.toString());
+  } catch {
+    return res.status(400).send("Invalid JSON");
+  }
+
+  const shopifyCustomerId = order.customer?.id;
+  if (!shopifyCustomerId) return res.status(200).send("No customer");
+
+  res.status(200).send("OK");
+
+  // Run sync in background after responding
+  syncSmilePoints(shopifyCustomerId).catch(err =>
+    console.error("Smile sync error:", err.message)
+  );
+});
+
+async function syncSmilePoints(shopifyCustomerId) {
+  // 1. Find Smile customer by Shopify customer ID
+  const smileResp = await fetch(
+    `https://api.smile.io/v1/customers?shopify_customer_id=${shopifyCustomerId}`,
+    { headers: { Authorization: `Bearer ${SMILE_API_KEY}` } }
+  );
+
+  if (!smileResp.ok) {
+    console.error(`Smile API error: ${smileResp.status}`);
+    return;
+  }
+
+  const smileData = await smileResp.json();
+  const smileCustomer = smileData.customers?.[0];
+
+  if (!smileCustomer) {
+    console.log(`No Smile customer found for Shopify ID ${shopifyCustomerId}`);
+    return;
+  }
+
+  const pointsBalance = smileCustomer.points_balance ?? 0;
+  console.log(`Syncing Smile points for customer ${shopifyCustomerId}: ${pointsBalance}`);
+
+  // 2. Write points to Shopify metafield
+  const metafieldResp = await fetch(
+    `https://${SHOP_DOMAIN}/admin/api/2025-07/customers/${shopifyCustomerId}/metafields.json`,
+    { headers: { "X-Shopify-Access-Token": SHOP_ACCESS_TOKEN } }
+  );
+
+  const metafieldData = await metafieldResp.json();
+  const existing = metafieldData.metafields?.find(
+    m => m.namespace === "custom" && m.key === "points_balance"
+  );
+
+  const body = {
+    metafield: {
+      namespace: "custom",
+      key: "points_balance",
+      value: String(pointsBalance),
+      type: "number_integer",
+    },
+  };
+
+  if (existing?.id) {
+    await fetch(
+      `https://${SHOP_DOMAIN}/admin/api/2025-07/customers/${shopifyCustomerId}/metafields/${existing.id}.json`,
+      {
+        method: "PUT",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Shopify-Access-Token": SHOP_ACCESS_TOKEN,
+        },
+        body: JSON.stringify(body),
+      }
+    );
+  } else {
+    await fetch(
+      `https://${SHOP_DOMAIN}/admin/api/2025-07/customers/${shopifyCustomerId}/metafields.json`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Shopify-Access-Token": SHOP_ACCESS_TOKEN,
+        },
+        body: JSON.stringify(body),
+      }
+    );
+  }
+
+  console.log(`Updated points_balance to ${pointsBalance} for customer ${shopifyCustomerId}`);
+}
 
 // ─── OAuth ────────────────────────────────────────────────────────────────────
 
