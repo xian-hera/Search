@@ -459,7 +459,6 @@ app.get("/api/pass/generate/:customerId", async (req, res) => {
 
 // ─── Apple Wallet Web Service endpoints ──────────────────────────────────────
 
-// Apple calls this to register a device push token for a pass
 app.post("/v1/devices/:deviceId/registrations/:passTypeId/:serialNumber", async (req, res) => {
   const { serialNumber } = req.params;
   const { pushToken } = req.body;
@@ -482,7 +481,6 @@ app.post("/v1/devices/:deviceId/registrations/:passTypeId/:serialNumber", async 
   }
 });
 
-// Apple calls this when a device unregisters
 app.delete("/v1/devices/:deviceId/registrations/:passTypeId/:serialNumber", async (req, res) => {
   const { serialNumber } = req.params;
   const authHeader = req.headers["authorization"];
@@ -502,7 +500,6 @@ app.delete("/v1/devices/:deviceId/registrations/:passTypeId/:serialNumber", asyn
   }
 });
 
-// Apple calls this to fetch the latest pass after a push notification
 app.get("/v1/passes/:passTypeId/:serialNumber", async (req, res) => {
   const { serialNumber } = req.params;
   const authHeader = req.headers["authorization"];
@@ -523,6 +520,30 @@ app.get("/v1/passes/:passTypeId/:serialNumber", async (req, res) => {
   } catch (err) {
     console.error("Pass fetch error:", err.message);
     res.status(500).send();
+  }
+});
+
+// ─── Wallet landing page by email (for Klaviyo) ───────────────────────────────
+
+app.get("/wallet/email/:email", async (req, res) => {
+  const email = decodeURIComponent(req.params.email);
+
+  try {
+    const resp = await fetch(
+      `https://${SHOP_DOMAIN}/admin/api/2025-07/customers/search.json?query=email:${encodeURIComponent(email)}&limit=1`,
+      { headers: { "X-Shopify-Access-Token": SHOP_ACCESS_TOKEN } }
+    );
+    const data = await resp.json();
+    const customer = data.customers?.[0];
+
+    if (!customer) {
+      return res.status(404).send("Customer not found");
+    }
+
+    res.redirect(`/wallet/${customer.id}`);
+  } catch (err) {
+    console.error("Email lookup error:", err.message);
+    res.status(500).send("Error");
   }
 });
 
@@ -625,7 +646,6 @@ app.post("/webhooks/orders", async (req, res) => {
 });
 
 async function syncSmilePoints(shopifyCustomerId) {
-  // 1. Get customer email from Shopify
   const shopifyResp = await fetch(
     `https://${SHOP_DOMAIN}/admin/api/2025-07/customers/${shopifyCustomerId}.json`,
     { headers: { "X-Shopify-Access-Token": SHOP_ACCESS_TOKEN } }
@@ -644,7 +664,6 @@ async function syncSmilePoints(shopifyCustomerId) {
     return;
   }
 
-  // 2. Look up customer in Smile by email
   const smileResp = await fetch(
     `https://api.smile.io/v1/customers?email=${encodeURIComponent(email)}`,
     { headers: { Authorization: `Bearer ${SMILE_API_KEY}` } }
@@ -666,11 +685,9 @@ async function syncSmilePoints(shopifyCustomerId) {
   const pointsBalance = smileCustomer.points_balance ?? 0;
   console.log(`Syncing Smile points for customer ${shopifyCustomerId} (${email}): ${pointsBalance}`);
 
-  // 3. Write points to Shopify metafield
   await setCustomerMetafield(shopifyCustomerId, "custom", "points_balance", String(pointsBalance), "number_integer");
   console.log(`Updated points_balance to ${pointsBalance} for customer ${shopifyCustomerId}`);
 
-  // 4. Send push notification to update Wallet pass if token exists
   const pushTokenMeta = await getCustomerMetafield(shopifyCustomerId, "custom", "wallet_push_token");
   const pushToken = pushTokenMeta?.value;
 
