@@ -279,7 +279,7 @@ async function sendPassUpdatePush(pushToken) {
     const client = http2.connect("https://api.push.apple.com", {
       cert: signerCert,
       key: signerKey,
-      ca: wwdr,
+      // ca: wwdr — not needed here; Node uses system root certs to verify api.push.apple.com
     });
 
     client.on("error", (err) => {
