@@ -35,6 +35,10 @@ const wwdr       = Buffer.from(process.env.WWDR_PEM_B64, "base64");
 const signerCert = Buffer.from(process.env.SIGNER_CERT_B64, "base64");
 const signerKey  = Buffer.from(process.env.SIGNER_KEY_B64, "base64");
 
+// ─── In-memory deviceId → customerId map (warm cache, rebuilt from Shopify on miss) ──
+// Key: deviceId, Value: customerId
+const deviceToCustomer = new Map();
+
 // ─── Product cache ────────────────────────────────────────────────────────────
 
 let variantCache = [];
@@ -218,6 +222,25 @@ async function setCustomerMetafield(customerId, namespace, key, value, type = "s
   }
 }
 
+// ─── deviceId → customerId lookup ────────────────────────────────────────────
+// First checks in-memory map (populated at registration time).
+// On miss (e.g. after server restart), falls back to Shopify metafield search
+// by scanning the customer's wallet_device_id metafield.
+// Shopify doesn't support reverse metafield lookup, so on cache miss we can't
+// easily find the customer — we return null and Apple will retry later after
+// the customer opens Wallet and re-registers.
+
+async function getCustomerIdByDeviceId(deviceId) {
+  // 1. Check in-memory map first (fast path)
+  if (deviceToCustomer.has(deviceId)) {
+    return deviceToCustomer.get(deviceId);
+  }
+  // 2. Cache miss (server restart). We can't reverse-search Shopify metafields
+  //    efficiently, so return null. Apple will re-register on next Wallet open.
+  console.log(`Device ${deviceId} not in memory cache (server may have restarted). Returning null.`);
+  return null;
+}
+
 // ─── Pass builder helper ──────────────────────────────────────────────────────
 
 const PASS_CUSTOMER_QUERY = `
@@ -263,23 +286,25 @@ async function generatePassBuffer(customerId) {
   return pass.getAsBuffer();
 }
 
-// ─── APNs push helper (native http2, no library) ──────────────────────────────
+// ─── APNs push helper (native http2) ─────────────────────────────────────────
 //
-// Apple Wallet push rules (from Apple docs):
+// Apple Wallet push rules:
 //   - Payload must be an empty JSON dictionary: {}
 //   - Use the same cert + key as pass signing
-//   - For certificate-based auth where cert is solely for PassKit,
-//     the apns-topic header should be OMITTED (cert already encodes it)
-//   - Always use production APNs endpoint
+//   - apns-topic omitted for PassKit-only certificates (cert already encodes it)
+//   - Always production APNs endpoint
+//
+// On BadDeviceToken: clears the stored push token so we don't keep hitting
+// a dead token. Apple will re-register automatically next time the user opens Wallet.
 
-async function sendPassUpdatePush(pushToken) {
+async function sendPassUpdatePush(pushToken, customerId) {
   return new Promise((resolve) => {
     const body = "{}";
 
     const client = http2.connect("https://api.push.apple.com", {
       cert: signerCert,
       key: signerKey,
-      // ca: wwdr — not needed here; Node uses system root certs to verify api.push.apple.com
+      // ca omitted — Node uses system root certs to verify api.push.apple.com
     });
 
     client.on("error", (err) => {
@@ -287,7 +312,6 @@ async function sendPassUpdatePush(pushToken) {
       resolve();
     });
 
-    // Note: apns-topic is intentionally omitted for PassKit-only certificates
     const req = client.request({
       ":method": "POST",
       ":path": `/3/device/${pushToken}`,
@@ -310,11 +334,29 @@ async function sendPassUpdatePush(pushToken) {
       responseBody += chunk;
     });
 
-    req.on("end", () => {
+    req.on("end", async () => {
       if (status === 200) {
         console.log(`Pass update push sent successfully to ${pushToken}`);
       } else {
         console.error(`APNs push failed — status: ${status}, body: ${responseBody || "(empty)"}`);
+
+        // BadDeviceToken: token is invalid/expired, clear it so we don't keep trying.
+        // Apple will re-register automatically next time the user opens Wallet.
+        if (responseBody.includes("BadDeviceToken") && customerId) {
+          console.log(`Clearing stale push token for customer ${customerId}`);
+          try {
+            await setCustomerMetafield(customerId, "custom", "wallet_push_token", "");
+            // Also remove from memory cache
+            for (const [devId, cId] of deviceToCustomer.entries()) {
+              if (cId === String(customerId)) {
+                deviceToCustomer.delete(devId);
+                break;
+              }
+            }
+          } catch (err) {
+            console.error("Failed to clear stale push token:", err.message);
+          }
+        }
       }
       client.close();
       resolve();
@@ -492,8 +534,9 @@ app.get("/api/pass/generate/:customerId", async (req, res) => {
 
 // ─── Apple Wallet Web Service endpoints ──────────────────────────────────────
 
+// Register device for push updates
 app.post("/v1/devices/:deviceId/registrations/:passTypeId/:serialNumber", async (req, res) => {
-  const { serialNumber } = req.params;
+  const { deviceId, serialNumber } = req.params;
   const { pushToken } = req.body;
   const authHeader = req.headers["authorization"];
 
@@ -505,8 +548,14 @@ app.post("/v1/devices/:deviceId/registrations/:passTypeId/:serialNumber", async 
   if (!pushToken || !customerId) return res.status(400).send("Bad Request");
 
   try {
+    // Store push token in metafield (persistent)
     await setCustomerMetafield(customerId, "custom", "wallet_push_token", pushToken);
-    console.log(`Registered push token for customer ${customerId}`);
+    // Store deviceId → customerId mapping in metafield (persistent, for server restarts)
+    await setCustomerMetafield(customerId, "custom", "wallet_device_id", deviceId);
+    // Also cache in memory for fast lookup
+    deviceToCustomer.set(deviceId, customerId);
+
+    console.log(`Registered device ${deviceId} / push token for customer ${customerId}`);
     res.status(201).send();
   } catch (err) {
     console.error("Register push token error:", err.message);
@@ -514,8 +563,9 @@ app.post("/v1/devices/:deviceId/registrations/:passTypeId/:serialNumber", async 
   }
 });
 
+// Unregister device
 app.delete("/v1/devices/:deviceId/registrations/:passTypeId/:serialNumber", async (req, res) => {
-  const { serialNumber } = req.params;
+  const { deviceId, serialNumber } = req.params;
   const authHeader = req.headers["authorization"];
 
   if (authHeader !== `ApplePass ${AUTH_TOKEN}`) {
@@ -526,13 +576,46 @@ app.delete("/v1/devices/:deviceId/registrations/:passTypeId/:serialNumber", asyn
 
   try {
     await setCustomerMetafield(customerId, "custom", "wallet_push_token", "");
-    console.log(`Unregistered push token for customer ${customerId}`);
+    await setCustomerMetafield(customerId, "custom", "wallet_device_id", "");
+    deviceToCustomer.delete(deviceId);
+    console.log(`Unregistered device ${deviceId} for customer ${customerId}`);
     res.status(200).send();
   } catch (err) {
     res.status(500).send();
   }
 });
 
+// Apple asks: which passes changed since last check?
+// Called by iOS after receiving our push notification.
+// We return the serial number for this device's customer so Apple fetches the latest pass.
+app.get("/v1/devices/:deviceId/registrations/:passTypeId", async (req, res) => {
+  const { deviceId } = req.params;
+  // passesUpdatedSince is provided by Apple but we always return the pass as updated
+  // since we only push when there's actually a change.
+
+  console.log(`Apple querying registrations for device ${deviceId}`);
+
+  const customerId = await getCustomerIdByDeviceId(deviceId);
+
+  if (!customerId) {
+    // Device not found — return 204 (no updates) so Apple doesn't retry aggressively
+    console.log(`No customer found for device ${deviceId}, returning 204`);
+    return res.status(204).send();
+  }
+
+  const serialNumber = `hera-${customerId}`;
+  const lastUpdated = new Date().toISOString();
+
+  console.log(`Returning serial ${serialNumber} for device ${deviceId}`);
+
+  res.set("Last-Modified", new Date().toUTCString());
+  res.json({
+    serialNumbers: [serialNumber],
+    lastUpdated,
+  });
+});
+
+// Apple fetches the latest pass after receiving serial number above
 app.get("/v1/passes/:passTypeId/:serialNumber", async (req, res) => {
   const { serialNumber } = req.params;
   const authHeader = req.headers["authorization"];
@@ -542,6 +625,7 @@ app.get("/v1/passes/:passTypeId/:serialNumber", async (req, res) => {
   }
 
   const customerId = serialNumber.replace("hera-", "");
+  console.log(`Apple fetching updated pass for customer ${customerId}`);
 
   try {
     const buffer = await generatePassBuffer(customerId);
@@ -725,7 +809,7 @@ async function syncSmilePoints(shopifyCustomerId) {
   const pushToken = pushTokenMeta?.value;
 
   if (pushToken) {
-    await sendPassUpdatePush(pushToken);
+    await sendPassUpdatePush(pushToken, shopifyCustomerId);
   } else {
     console.log(`No push token for customer ${shopifyCustomerId}, skipping push`);
   }
