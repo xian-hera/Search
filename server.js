@@ -4,7 +4,7 @@ import fetch from "node-fetch";
 import { PKPass } from "passkit-generator";
 import { join, dirname } from "path";
 import { fileURLToPath } from "url";
-import apn from "@parse/node-apn";
+import http2 from "http2";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -34,13 +34,6 @@ const SCOPES = "read_products,read_inventory,read_customers,write_customers,read
 const wwdr       = Buffer.from(process.env.WWDR_PEM_B64, "base64");
 const signerCert = Buffer.from(process.env.SIGNER_CERT_B64, "base64");
 const signerKey  = Buffer.from(process.env.SIGNER_KEY_B64, "base64");
-
-// ─── APNs provider (uses same cert as pass signing) ──────────────────────────
-const apnProvider = new apn.Provider({
-  cert: signerCert,
-  key: signerKey,
-  production: true,
-});
 
 // ─── Product cache ────────────────────────────────────────────────────────────
 
@@ -270,23 +263,63 @@ async function generatePassBuffer(customerId) {
   return pass.getAsBuffer();
 }
 
-// ─── APNs push helper ─────────────────────────────────────────────────────────
+// ─── APNs push helper (native http2, no library) ──────────────────────────────
+//
+// Apple Wallet push rules (from Apple docs):
+//   - Payload must be an empty JSON dictionary: {}
+//   - Use the same cert + key as pass signing
+//   - For certificate-based auth where cert is solely for PassKit,
+//     the apns-topic header should be OMITTED (cert already encodes it)
+//   - Always use production APNs endpoint
 
 async function sendPassUpdatePush(pushToken) {
-  const note = new apn.Notification();
-  note.topic = PASS_TYPE_ID;
-  note.rawPayload = {};  // ← FIX: rawPayload forces {} to be serialized correctly
+  return new Promise((resolve) => {
+    const body = "{}";
 
-  try {
-    const result = await apnProvider.send(note, pushToken);
-    if (result.failed.length) {
-      console.error("APNs push failed:", JSON.stringify(result.failed));
-    } else {
-      console.log(`Pass update push sent to ${pushToken}`);
-    }
-  } catch (err) {
-    console.error("APNs error:", err.message);
-  }
+    const client = http2.connect("https://api.push.apple.com", {
+      cert: signerCert,
+      key: signerKey,
+      ca: wwdr,
+    });
+
+    client.on("error", (err) => {
+      console.error("APNs connection error:", err.message);
+      resolve();
+    });
+
+    // Note: apns-topic is intentionally omitted for PassKit-only certificates
+    const req = client.request({
+      ":method": "POST",
+      ":path": `/3/device/${pushToken}`,
+      "apns-push-type": "background",
+      "content-type": "application/json",
+      "content-length": Buffer.byteLength(body),
+    });
+
+    req.write(body);
+    req.end();
+
+    let status;
+    let responseBody = "";
+
+    req.on("response", (headers) => {
+      status = headers[":status"];
+    });
+
+    req.on("data", (chunk) => {
+      responseBody += chunk;
+    });
+
+    req.on("end", () => {
+      if (status === 200) {
+        console.log(`Pass update push sent successfully to ${pushToken}`);
+      } else {
+        console.error(`APNs push failed — status: ${status}, body: ${responseBody || "(empty)"}`);
+      }
+      client.close();
+      resolve();
+    });
+  });
 }
 
 // ─── CORS ─────────────────────────────────────────────────────────────────────
