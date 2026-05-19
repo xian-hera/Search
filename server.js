@@ -275,7 +275,7 @@ async function generatePassBuffer(customerId) {
 async function sendPassUpdatePush(pushToken) {
   const note = new apn.Notification();
   note.topic = PASS_TYPE_ID;
-  note.payload = {};
+  note.rawPayload = {};  // ← FIX: rawPayload forces {} to be serialized correctly
 
   try {
     const result = await apnProvider.send(note, pushToken);
