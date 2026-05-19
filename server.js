@@ -4,6 +4,7 @@ import fetch from "node-fetch";
 import { PKPass } from "passkit-generator";
 import { join, dirname } from "path";
 import { fileURLToPath } from "url";
+import apn from "@parse/node-apn";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -25,12 +26,21 @@ const {
   SMILE_API_KEY,
 } = process.env;
 
+const PASS_TYPE_ID = "pass.com.herabeauty.loyalty";
+const AUTH_TOKEN   = "herabeauty2026loyalty";
 const SCOPES = "read_products,read_inventory,read_customers,write_customers,read_orders";
 
-// ─── Apple Wallet certificates (from environment variables) ───────────────────
+// ─── Apple Wallet certificates ────────────────────────────────────────────────
 const wwdr       = Buffer.from(process.env.WWDR_PEM_B64, "base64");
 const signerCert = Buffer.from(process.env.SIGNER_CERT_B64, "base64");
 const signerKey  = Buffer.from(process.env.SIGNER_KEY_B64, "base64");
+
+// ─── APNs provider (uses same cert as pass signing) ──────────────────────────
+const apnProvider = new apn.Provider({
+  cert: signerCert,
+  key: signerKey,
+  production: true,
+});
 
 // ─── Product cache ────────────────────────────────────────────────────────────
 
@@ -179,6 +189,42 @@ function verifyToken(token, customerId) {
   return receivedHmac === expectedHmac;
 }
 
+// ─── Shopify metafield helpers ────────────────────────────────────────────────
+
+async function getCustomerMetafield(customerId, namespace, key) {
+  const resp = await fetch(
+    `https://${SHOP_DOMAIN}/admin/api/2025-07/customers/${customerId}/metafields.json`,
+    { headers: { "X-Shopify-Access-Token": SHOP_ACCESS_TOKEN } }
+  );
+  const data = await resp.json();
+  return data.metafields?.find(m => m.namespace === namespace && m.key === key) || null;
+}
+
+async function setCustomerMetafield(customerId, namespace, key, value, type = "single_line_text_field") {
+  const existing = await getCustomerMetafield(customerId, namespace, key);
+  const body = { metafield: { namespace, key, value: String(value), type } };
+
+  if (existing?.id) {
+    await fetch(
+      `https://${SHOP_DOMAIN}/admin/api/2025-07/customers/${customerId}/metafields/${existing.id}.json`,
+      {
+        method: "PUT",
+        headers: { "Content-Type": "application/json", "X-Shopify-Access-Token": SHOP_ACCESS_TOKEN },
+        body: JSON.stringify(body),
+      }
+    );
+  } else {
+    await fetch(
+      `https://${SHOP_DOMAIN}/admin/api/2025-07/customers/${customerId}/metafields.json`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-Shopify-Access-Token": SHOP_ACCESS_TOKEN },
+        body: JSON.stringify(body),
+      }
+    );
+  }
+}
+
 // ─── Pass builder helper ──────────────────────────────────────────────────────
 
 const PASS_CUSTOMER_QUERY = `
@@ -224,12 +270,31 @@ async function generatePassBuffer(customerId) {
   return pass.getAsBuffer();
 }
 
+// ─── APNs push helper ─────────────────────────────────────────────────────────
+
+async function sendPassUpdatePush(pushToken) {
+  const note = new apn.Notification();
+  note.topic = PASS_TYPE_ID;
+  note.payload = {};
+
+  try {
+    const result = await apnProvider.send(note, pushToken);
+    if (result.failed.length) {
+      console.error("APNs push failed:", JSON.stringify(result.failed));
+    } else {
+      console.log(`Pass update push sent to ${pushToken}`);
+    }
+  } catch (err) {
+    console.error("APNs error:", err.message);
+  }
+}
+
 // ─── CORS ─────────────────────────────────────────────────────────────────────
 
 app.use((req, res, next) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
-  res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+  res.setHeader("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
   if (req.method === "OPTIONS") return res.sendStatus(200);
   next();
 });
@@ -392,6 +457,75 @@ app.get("/api/pass/generate/:customerId", async (req, res) => {
   }
 });
 
+// ─── Apple Wallet Web Service endpoints ──────────────────────────────────────
+
+// Apple calls this to register a device push token for a pass
+app.post("/v1/devices/:deviceId/registrations/:passTypeId/:serialNumber", async (req, res) => {
+  const { serialNumber } = req.params;
+  const { pushToken } = req.body;
+  const authHeader = req.headers["authorization"];
+
+  if (authHeader !== `ApplePass ${AUTH_TOKEN}`) {
+    return res.status(401).send("Unauthorized");
+  }
+
+  const customerId = serialNumber.replace("hera-", "");
+  if (!pushToken || !customerId) return res.status(400).send("Bad Request");
+
+  try {
+    await setCustomerMetafield(customerId, "custom", "wallet_push_token", pushToken);
+    console.log(`Registered push token for customer ${customerId}`);
+    res.status(201).send();
+  } catch (err) {
+    console.error("Register push token error:", err.message);
+    res.status(500).send();
+  }
+});
+
+// Apple calls this when a device unregisters
+app.delete("/v1/devices/:deviceId/registrations/:passTypeId/:serialNumber", async (req, res) => {
+  const { serialNumber } = req.params;
+  const authHeader = req.headers["authorization"];
+
+  if (authHeader !== `ApplePass ${AUTH_TOKEN}`) {
+    return res.status(401).send("Unauthorized");
+  }
+
+  const customerId = serialNumber.replace("hera-", "");
+
+  try {
+    await setCustomerMetafield(customerId, "custom", "wallet_push_token", "");
+    console.log(`Unregistered push token for customer ${customerId}`);
+    res.status(200).send();
+  } catch (err) {
+    res.status(500).send();
+  }
+});
+
+// Apple calls this to fetch the latest pass after a push notification
+app.get("/v1/passes/:passTypeId/:serialNumber", async (req, res) => {
+  const { serialNumber } = req.params;
+  const authHeader = req.headers["authorization"];
+
+  if (authHeader !== `ApplePass ${AUTH_TOKEN}`) {
+    return res.status(401).send("Unauthorized");
+  }
+
+  const customerId = serialNumber.replace("hera-", "");
+
+  try {
+    const buffer = await generatePassBuffer(customerId);
+    res.set({
+      "Content-Type": "application/vnd.apple.pkpass",
+      "Last-Modified": new Date().toUTCString(),
+    });
+    res.send(buffer);
+  } catch (err) {
+    console.error("Pass fetch error:", err.message);
+    res.status(500).send();
+  }
+});
+
 // ─── Apple Wallet landing page ────────────────────────────────────────────────
 
 app.get("/wallet/:customerId", (req, res) => {
@@ -459,7 +593,7 @@ app.get("/wallet/:customerId", (req, res) => {
 </html>`);
 });
 
-// ─── Shopify orders/paid webhook → sync Smile points to metafield ─────────────
+// ─── Shopify orders/paid webhook → sync Smile points + push update ────────────
 
 app.post("/webhooks/orders", async (req, res) => {
   const hmacHeader = req.headers["x-shopify-hmac-sha256"];
@@ -533,52 +667,18 @@ async function syncSmilePoints(shopifyCustomerId) {
   console.log(`Syncing Smile points for customer ${shopifyCustomerId} (${email}): ${pointsBalance}`);
 
   // 3. Write points to Shopify metafield
-  const metafieldResp = await fetch(
-    `https://${SHOP_DOMAIN}/admin/api/2025-07/customers/${shopifyCustomerId}/metafields.json`,
-    { headers: { "X-Shopify-Access-Token": SHOP_ACCESS_TOKEN } }
-  );
-
-  const metafieldData = await metafieldResp.json();
-  const existing = metafieldData.metafields?.find(
-    m => m.namespace === "custom" && m.key === "points_balance"
-  );
-
-  const body = {
-    metafield: {
-      namespace: "custom",
-      key: "points_balance",
-      value: String(pointsBalance),
-      type: "number_integer",
-    },
-  };
-
-  if (existing?.id) {
-    await fetch(
-      `https://${SHOP_DOMAIN}/admin/api/2025-07/customers/${shopifyCustomerId}/metafields/${existing.id}.json`,
-      {
-        method: "PUT",
-        headers: {
-          "Content-Type": "application/json",
-          "X-Shopify-Access-Token": SHOP_ACCESS_TOKEN,
-        },
-        body: JSON.stringify(body),
-      }
-    );
-  } else {
-    await fetch(
-      `https://${SHOP_DOMAIN}/admin/api/2025-07/customers/${shopifyCustomerId}/metafields.json`,
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "X-Shopify-Access-Token": SHOP_ACCESS_TOKEN,
-        },
-        body: JSON.stringify(body),
-      }
-    );
-  }
-
+  await setCustomerMetafield(shopifyCustomerId, "custom", "points_balance", String(pointsBalance), "number_integer");
   console.log(`Updated points_balance to ${pointsBalance} for customer ${shopifyCustomerId}`);
+
+  // 4. Send push notification to update Wallet pass if token exists
+  const pushTokenMeta = await getCustomerMetafield(shopifyCustomerId, "custom", "wallet_push_token");
+  const pushToken = pushTokenMeta?.value;
+
+  if (pushToken) {
+    await sendPassUpdatePush(pushToken);
+  } else {
+    console.log(`No push token for customer ${shopifyCustomerId}, skipping push`);
+  }
 }
 
 // ─── OAuth ────────────────────────────────────────────────────────────────────

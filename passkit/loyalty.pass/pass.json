@@ -7,6 +7,8 @@
   "foregroundColor": "rgb(255, 255, 255)",
   "backgroundColor": "rgb(227, 42, 105)",
   "labelColor": "rgb(255, 255, 255)",
+  "webServiceURL": "https://search-0wf4.onrender.com/",
+  "authenticationToken": "herabeauty2026loyalty",
   "storeCard": {
     "primaryFields": [],
     "secondaryFields": []
