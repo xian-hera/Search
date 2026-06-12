@@ -556,6 +556,19 @@ app.post("/v1/devices/:deviceId/registrations/:passTypeId/:serialNumber", async 
     deviceToCustomer.set(deviceId, customerId);
 
     console.log(`Registered device ${deviceId} / push token for customer ${customerId}`);
+
+    // 异步查 Shopify email → 更新 Klaviyo，不阻塞对 Apple 的 201 响应
+    fetch(
+      `https://${SHOP_DOMAIN}/admin/api/2025-07/customers/${customerId}.json`,
+      { headers: { "X-Shopify-Access-Token": SHOP_ACCESS_TOKEN } }
+    )
+      .then(r => r.json())
+      .then(d => {
+        const email = d.customer?.email;
+        if (email) return updateKlaviyoAppleCard(email);
+      })
+      .catch(err => console.error("Klaviyo AppleCard update failed:", err.message));
+
     res.status(201).send();
   } catch (err) {
     console.error("Register push token error:", err.message);
@@ -730,6 +743,61 @@ app.get("/wallet/:customerId", (req, res) => {
 </body>
 </html>`);
 });
+
+// ─── Klaviyo: mark Apple Wallet card added ────────────────────────────────────
+
+async function updateKlaviyoAppleCard(email) {
+  const KLAVIYO_API_KEY = process.env.KLAVIYO_API_KEY;
+  if (!KLAVIYO_API_KEY) {
+    console.log("KLAVIYO_API_KEY not set, skipping Klaviyo update");
+    return;
+  }
+
+  const headers = {
+    "Authorization": `Klaviyo-API-Key ${KLAVIYO_API_KEY}`,
+    "revision": "2026-04-15",
+    "Content-Type": "application/json",
+  };
+
+  // Step 1: 用 email 查 Klaviyo profile ID
+  const searchResp = await fetch(
+    `https://a.klaviyo.com/api/profiles?filter=equals(email,${JSON.stringify(email)})`,
+    { headers }
+  );
+  if (!searchResp.ok) throw new Error(`Klaviyo GET profiles failed: ${searchResp.status}`);
+  const searchData = await searchResp.json();
+  const profileId = searchData.data?.[0]?.id;
+
+  if (!profileId) {
+    console.log(`No Klaviyo profile found for email ${email}, skipping`);
+    return;
+  }
+
+  // Step 2: 写入 custom property AppleCard: true
+  const updateResp = await fetch(
+    `https://a.klaviyo.com/api/profiles/${profileId}`,
+    {
+      method: "PATCH",
+      headers,
+      body: JSON.stringify({
+        data: {
+          type: "profile",
+          id: profileId,
+          attributes: {
+            properties: {
+              AppleCard: true,
+            },
+          },
+        },
+      }),
+    }
+  );
+  if (!updateResp.ok) {
+    const errText = await updateResp.text();
+    throw new Error(`Klaviyo PATCH profile failed: ${updateResp.status} ${errText}`);
+  }
+  console.log(`Klaviyo AppleCard=true set for ${email} (profile ${profileId})`);
+}
 
 // ─── Shopify orders/paid webhook → sync Smile points + push update ────────────
 
